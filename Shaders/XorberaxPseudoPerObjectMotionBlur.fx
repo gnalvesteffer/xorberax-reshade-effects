@@ -403,9 +403,13 @@ ui_label = "Xorberax: Pseudo Per-Object Motion Blur";
 >
 
 {
-pass
-{
-VertexShader = FullscreenVS;
-PixelShader = PseudoPerObjectMBPS;
-}
+    // Match DLSS5_Feed: Launchpad only computes the MotionVectorsTex / normals
+    // when a consumer requests them via the shared PredicationBuffer.
+    IPC_REQUEST_FEATURE(MARTYSMODS_IPC_FEATURE_OPTICALFLOW | MARTYSMODS_IPC_FEATURE_NORMALS)
+
+    pass
+    {
+        VertexShader = FullscreenVS;
+        PixelShader = PseudoPerObjectMBPS;
+    }
 }
