@@ -96,25 +96,9 @@ float2 uv : TEXCOORD0;
 
 VSOUT FullscreenVS(uint id : SV_VertexID)
 {
-VSOUT o;
-
-
-float2 pos = float2(
-    (id << 1) & 3,
-    id & 3
-);
-
-o.vpos = float4(
-    pos * float2(2.0, -2.0) + float2(-1.0, 1.0),
-    0.0,
-    1.0
-);
-
-o.uv = pos;
-
-return o;
-
-
+    VSOUT o;
+    FullscreenTriangleVS(id, o.vpos, o.uv);
+    return o;
 }
 
 float sample_weight(
