@@ -77,7 +77,7 @@ ui_tooltip = "Overall multiplier for the inferred hemisphere fill light";
 ui_min = 0.0;
 ui_max = 3.0;
 
-> = 0.6;
+> = 0.35;
 
 uniform float UI_SKY_BRIGHTNESS_RESPONSE <
 ui_label = "Sky Brightness Response";
@@ -93,7 +93,23 @@ ui_tooltip = "Higher values concentrate the ambient fill into darker/shadowed pi
 ui_min = 0.0;
 ui_max = 6.0;
 
-> = 1.5;
+> = 2.5;
+
+uniform float UI_HIGHLIGHT_PROTECT_START <
+ui_label = "Highlight Protect Start";
+ui_tooltip = "Scene luma at which the ambient fill starts fading out.\nRaise this if brightly sunlit ground still looks washed/hazed";
+ui_min = 0.0;
+ui_max = 1.0;
+
+> = 0.35;
+
+uniform float UI_HIGHLIGHT_PROTECT_END <
+ui_label = "Highlight Protect End";
+ui_tooltip = "Scene luma above which the ambient fill is fully removed";
+ui_min = 0.0;
+ui_max = 1.0;
+
+> = 0.65;
 
 uniform float UI_RIM_STRENGTH <
 ui_label = "Rim Strength";
@@ -126,7 +142,7 @@ ui_tooltip = "Enable if sky/ground colors read as inverted for this game";
 
 uniform int UI_DEBUG <
 ui_type = "combo";
-ui_items = "Off\0Sky Capture\0Ground Capture\0Shadow Mask\0Rim Mask\0Normals\0";
+ui_items = "Off\0Sky Capture\0Ground Capture\0Shadow Mask\0Rim Mask\0Normals\0Highlight Protect\0";
 ui_label = "Debug";
 
 > = 0;
@@ -291,11 +307,20 @@ float ambientLuma =
         0.0001
     );
 
-// Hue/tint only, normalized to unit luma - this is what actually gets
-// applied to the scene, so a dim captured sky tints without darkening.
+// Normalize by max channel, not luma, to get the tint. Luma weights
+// green heavily and blue barely at all (0.114), so a saturated blue
+// sky (low luma, high blue channel) would blow up past 1.0 per-channel
+// if normalized by luma - max-channel normalization keeps every tint
+// channel in [0,1], so it can't run away regardless of hue.
+float ambientMaxChannel =
+    max(
+        max(ambientRaw.r, ambientRaw.g),
+        max(ambientRaw.b, 0.0001)
+    );
+
 float3 ambientTint =
     ambientRaw /
-    ambientLuma;
+    ambientMaxChannel;
 
 // A dark captured sky (night, indoors) should barely contribute any
 // fill/rim at all, even at high Ambient Fill Strength - this scalar
@@ -319,6 +344,26 @@ float shadowMask =
 if (UI_DEBUG == 3)
 {
     OUT = float4(shadowMask.xxx, 1.0);
+    return;
+}
+
+
+// Hard cutoff on top of the soft shadowMask curve above - this is what
+// actually stops already-sunlit, evenly-bright ground (which otherwise
+// still passes a fair amount through a pure pow() curve) from getting
+// a global wash. shadowMask alone couldn't distinguish "genuinely dark"
+// from "just not maximally bright" on flat, uniformly-lit terrain.
+float highlightProtect =
+    1.0 -
+    smoothstep(
+        UI_HIGHLIGHT_PROTECT_START,
+        max(UI_HIGHLIGHT_PROTECT_END, UI_HIGHLIGHT_PROTECT_START + 0.0001),
+        centerLuma
+    );
+
+if (UI_DEBUG == 6)
+{
+    OUT = float4(highlightProtect.xxx, 1.0);
     return;
 }
 
@@ -351,6 +396,7 @@ float fillAmount =
     UI_AMBIENT_STRENGTH *
     skyBrightnessScalar *
     shadowMask *
+    highlightProtect *
     skyboxFade;
 
 float rimAmount =
