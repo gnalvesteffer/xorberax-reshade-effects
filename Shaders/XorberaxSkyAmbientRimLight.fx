@@ -173,6 +173,21 @@ ui_max = 8.0;
 
 > = 2.0;
 
+uniform int UI_RIM_EDGE_SAMPLES <
+ui_label = "Rim Edge Samples";
+ui_tooltip = "Number of neighbor samples to average for depth-edge (higher = smoother but slower)";
+ui_min = 1;
+ui_max = 16;
+
+> = 8;
+
+uniform int UI_RIM_BLEND_MODE <
+ui_type = "combo";
+ui_items = "Add\0SoftLight\0Screen\0Overlay\0";
+ui_label = "Rim Blend Mode";
+
+> = 0;
+
 uniform float UI_CAPTURE_DETAIL_MIP <
 ui_label = "Sky/Ground Detail";
 ui_tooltip = "Mip level read from the sky/ground capture. Low = more real\nspatial variation (can get noisy on a small capture). High = one\nflat averaged color, same as before this slider existed.";
@@ -536,14 +551,23 @@ float2 px = ddx(IN.uv);
 float2 py = ddy(IN.uv);
 // Fallback if ddx/ddy of UV is zero for some drivers.
 float2 approxPix = (length(px) > 0.0 || length(py) > 0.0) ? (px + py) * 0.5 : float2(1.0/1024.0, 1.0/1024.0);
-float2 step = approxPix * UI_RIM_EDGE_SPREAD;
+float2 uvStep = approxPix * UI_RIM_EDGE_SPREAD;
 
-float nd1 = Depth::get_linear_depth(uv + float2( step.x,  0.0));
-float nd2 = Depth::get_linear_depth(uv + float2(-step.x,  0.0));
-float nd3 = Depth::get_linear_depth(uv + float2( 0.0,  step.y));
-float nd4 = Depth::get_linear_depth(uv + float2( 0.0, -step.y));
 
-float depthDiffAvg = (abs(depth - nd1) + abs(depth - nd2) + abs(depth - nd3) + abs(depth - nd4)) * 0.25;
+// Multi-sample neighbor depth average. Samples are placed in a circle
+// so larger `UI_RIM_EDGE_SAMPLES` + `UI_RIM_EDGE_SPREAD` produce
+// progressively softer edges instead of a hard outline.
+int samples = clamp(UI_RIM_EDGE_SAMPLES, 1, 16);
+float sumDiff = 0.0;
+for (int i = 0; i < samples; ++i)
+{
+    float fi = (float)i;
+    float ang = 6.28318530718 * (fi / (float)samples);
+    float2 off = float2(cos(ang), sin(ang)) * uvStep;
+    float nd = Depth::get_linear_depth(uv + off);
+    sumDiff += abs(depth - nd);
+}
+float depthDiffAvg = sumDiff / (float)samples;
 float depthGrad = depthDiffAvg * UI_RIM_DEPTH_SCALE;
 
 float edgeLow = max(UI_RIM_DEPTH_EDGE_THRESHOLD - UI_RIM_DEPTH_EDGE_SOFTNESS, 0.0);
@@ -557,13 +581,42 @@ edgeMask = pow(edgeMask, lerp(1.0, 0.7, spreadSoft));
 rimAmount *= edgeMask;
 
 
-float3 result =
-    centerColor +
-    ambientTint * fillAmount +
-    ambientTint * rimAmount;
+float3 baseWithFill = centerColor + ambientTint * fillAmount;
+float3 rimContribution = ambientTint * rimAmount;
 
+float3 finalColor;
+if (UI_RIM_BLEND_MODE == 0)
+{
+    // Add
+    finalColor = baseWithFill + rimContribution;
+}
+else if (UI_RIM_BLEND_MODE == 1)
+{
+    // SoftLight approximation per-channel
+    float3 a = baseWithFill;
+    float3 b = rimContribution;
+    float3 res1 = a - (1.0 - 2.0 * b) * a * (1.0 - a);
+    float3 res2 = a + (2.0 * b - 1.0) * (sqrt(a) - a);
+    float3 mask = saturate(sign(0.5 - b)); // 1 when b < 0.5
+    finalColor = lerp(res2, res1, mask);
+}
+else if (UI_RIM_BLEND_MODE == 2)
+{
+    // Screen
+    finalColor = 1.0 - (1.0 - baseWithFill) * (1.0 - rimContribution);
+}
+else
+{
+    // Overlay
+    float3 a = baseWithFill;
+    float3 b = rimContribution;
+    float3 higher = 1.0 - 2.0 * (1.0 - a) * (1.0 - b);
+    float3 lower = 2.0 * a * b;
+    float3 mask = saturate(sign(a - 0.5)); // 1 when a >= 0.5
+    finalColor = lerp(higher, lower, 1.0 - mask);
+}
 
-OUT = float4(result, 1.0);
+OUT = float4(saturate(finalColor), 1.0);
 
 
 }
