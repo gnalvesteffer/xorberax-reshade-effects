@@ -133,6 +133,46 @@ ui_max = 16.0;
 
 > = 3.0;
 
+uniform float UI_RIM_DETAIL_BLEND <
+ui_label = "Rim Detail Blend";
+ui_tooltip = "How much rim lighting follows high-frequency normal detail (0 = ignore detail, 1 = fully follow)";
+ui_min = 0.0;
+ui_max = 1.0;
+
+> = 1.0;
+
+uniform float UI_RIM_DEPTH_EDGE_THRESHOLD <
+ui_label = "Rim Depth Edge Threshold";
+ui_tooltip = "Depth gradient threshold to consider a pixel part of a silhouette edge";
+ui_min = 0.0001;
+ui_max = 0.05;
+
+> = 0.002;
+
+uniform float UI_RIM_DEPTH_EDGE_SOFTNESS <
+ui_label = "Rim Edge Softness";
+ui_tooltip = "Softness around the depth-edge threshold for smoother rim falloff";
+ui_min = 0.0;
+ui_max = 0.02;
+
+> = 0.001;
+
+uniform float UI_RIM_DEPTH_SCALE <
+ui_label = "Rim Depth Scale";
+ui_tooltip = "Scale the measured depth gradient so rim applies to more/less of the depth (0.1 = subtle, 10 = very broad)";
+ui_min = 0.1;
+ui_max = 10.0;
+
+> = 1.0;
+
+uniform float UI_RIM_EDGE_SPREAD <
+ui_label = "Rim Edge Spread";
+ui_tooltip = "How far around a silhouette to sample depth for a softer rim (higher = softer/wider)";
+ui_min = 0.5;
+ui_max = 8.0;
+
+> = 2.0;
+
 uniform float UI_CAPTURE_DETAIL_MIP <
 ui_label = "Sky/Ground Detail";
 ui_tooltip = "Mip level read from the sky/ground capture. Low = more real\nspatial variation (can get noisy on a small capture). High = one\nflat averaged color, same as before this slider existed.";
@@ -161,6 +201,20 @@ ui_items = "Off\0Sky Capture\0Ground Capture\0Shadow Mask\0Rim Mask\0Normals\0Hi
 ui_label = "Debug";
 
 > = 0;
+
+uniform bool UI_MIRROR_REAR <
+ui_label = "Mirror Rear Lighting";
+ui_tooltip = "Enable mirrored sky/ground sampling for back-facing surfaces";
+
+> = true;
+
+uniform float UI_NORMAL_DETAIL <
+ui_label = "Normal Detail";
+ui_tooltip = "0 = flatten normals, 1 = neutral, >1 = amplify small normal variation for detail (pebbles, cracks)";
+ui_min = 0.0;
+ui_max = 3.0;
+
+> = 1.0;
 
 texture DepthInputTex : DEPTH;
 sampler DepthInput { Texture = DepthInputTex; };
@@ -273,20 +327,33 @@ float depth =
 // Launchpad's reconstructed view space is Y-down (see header comment),
 // so "faces upward" is normal.y < 0 - flip the sign here, not the bias.
 // 1.0 = fully sky-facing, 0.0 = fully ground-facing.
-float skyFactor =
+float skyFactorRaw =
     saturate(-normal.y * 0.5 + 0.5);
+// Apply the Normal Detail contrast to the sky blend so small normal
+// deviations can affect whether a pixel reads more sky or ground.
+float skyFactor =
+    saturate((skyFactorRaw - 0.5) * UI_NORMAL_DETAIL + 0.5);
 
 
 // How strongly this normal points up/down, independent of the sky/ground
 // blend weight above - used to pick WHERE within the captured band to
 // sample, so a steep upward tilt reads nearer the zenith end of the sky
 // capture and a shallow one reads nearer the horizon end (mirrored for
-// ground/nadir), instead of every surface reading one flat average.
-float upAmount =
+// ground/nadir). Apply a user-controlled contrast so small micro-normal
+// deviations (pebbles, cracks) can influence the sampling when desired.
+float upAmountRaw =
     saturate(-normal.y);
 
-float downAmount =
+float downAmountRaw =
     saturate(normal.y);
+
+// Contrast: 0 => flattened (0.5), 1 => identity, >1 => amplified detail
+float detailContrast = UI_NORMAL_DETAIL;
+float upAmount =
+    saturate((upAmountRaw - 0.5) * detailContrast + 0.5);
+
+float downAmount =
+    saturate((downAmountRaw - 0.5) * detailContrast + 0.5);
 
 // U reuses this pixel's own screen column as a cheap proxy for "what's
 // the sky/ground doing over this part of the view" - not a real azimuth
@@ -297,6 +364,14 @@ float2 skyLookupUV =
 
 float2 groundLookupUV =
     float2(uv.x, downAmount);
+
+// If requested, mirror the sampled sky/ground horizontally for back-facing
+// surfaces to approximate lighting coming from behind the camera.
+if (UI_MIRROR_REAR && normal.z > 0.0)
+{
+    skyLookupUV.x = 1.0 - skyLookupUV.x;
+    groundLookupUV.x = 1.0 - groundLookupUV.x;
+}
 
 float3 skyColor =
     tex2Dlod(
@@ -404,9 +479,13 @@ if (UI_DEBUG == 6)
 }
 
 
+// Sharpen the rim by applying normal-detail contrast to the normal.z
+// magnitude before computing the rim falloff.
+float normalZRaw = saturate(abs(normal.z));
+float normalZ = saturate((normalZRaw - 0.5) * UI_NORMAL_DETAIL + 0.5);
 float rimFactor =
     pow(
-        1.0 - saturate(abs(normal.z)),
+        1.0 - normalZ,
         max(UI_RIM_POWER, 0.0001)
     );
 
@@ -440,6 +519,42 @@ float rimAmount =
     rimFactor *
     skyBrightnessScalar *
     skyboxFade;
+
+// Reduce rim on large smooth surfaces by measuring high-frequency normal
+// variation via screen derivatives. This makes clothing/characters keep
+// their fine rim while big smooth walls/boulders get less overdrawn rim.
+float3 ddxN = ddx(normal);
+float3 ddyN = ddy(normal);
+float normalFreq = length(ddxN) + length(ddyN);
+// Scale normalFreq by the user detail control so its influence respects UI_NORMAL_DETAIL.
+float detailMask = saturate(normalFreq * 20.0 * max(UI_NORMAL_DETAIL, 0.001));
+rimAmount *= lerp(1.0, detailMask, saturate(UI_RIM_DETAIL_BLEND));
+
+// Depth-edge mask: sample neighboring linear depth values and average
+// their absolute differences to create a softer, spreadable edge mask.
+float2 px = ddx(IN.uv);
+float2 py = ddy(IN.uv);
+// Fallback if ddx/ddy of UV is zero for some drivers.
+float2 approxPix = (length(px) > 0.0 || length(py) > 0.0) ? (px + py) * 0.5 : float2(1.0/1024.0, 1.0/1024.0);
+float2 step = approxPix * UI_RIM_EDGE_SPREAD;
+
+float nd1 = Depth::get_linear_depth(uv + float2( step.x,  0.0));
+float nd2 = Depth::get_linear_depth(uv + float2(-step.x,  0.0));
+float nd3 = Depth::get_linear_depth(uv + float2( 0.0,  step.y));
+float nd4 = Depth::get_linear_depth(uv + float2( 0.0, -step.y));
+
+float depthDiffAvg = (abs(depth - nd1) + abs(depth - nd2) + abs(depth - nd3) + abs(depth - nd4)) * 0.25;
+float depthGrad = depthDiffAvg * UI_RIM_DEPTH_SCALE;
+
+float edgeLow = max(UI_RIM_DEPTH_EDGE_THRESHOLD - UI_RIM_DEPTH_EDGE_SOFTNESS, 0.0);
+float edgeHigh = UI_RIM_DEPTH_EDGE_THRESHOLD + UI_RIM_DEPTH_EDGE_SOFTNESS;
+float edgeMask = smoothstep(edgeLow, edgeHigh, depthGrad);
+
+// Soften the mask further by applying a mild power curve when spread is large
+float spreadSoft = saturate((UI_RIM_EDGE_SPREAD - 1.0) / 7.0);
+edgeMask = pow(edgeMask, lerp(1.0, 0.7, spreadSoft));
+
+rimAmount *= edgeMask;
 
 
 float3 result =
