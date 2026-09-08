@@ -19,11 +19,27 @@ means the vertical axis of whatever space Launchpad's normals are in.
 That is usually close enough to true world-up to read correctly, but it
 will drift on heavy camera roll or extreme up/down look angles.
 
-IMPORTANT ASSUMPTION: this shader assumes Deferred::get_normals(uv)
-returns a normal where +Y is "faces upward" and Z is "faces the camera"
-(matching common Launchpad/mmx_deferred convention). If sky/ground or
-rim look inverted or wrong on your setup, use "Flip Sky/Ground Axis"
-below, or tell me the actual mmx_deferred.fxh signature and I'll adjust.
+CONFIRMED AGAINST LAUNCHPAD SOURCE (MartysMods_LAUNCHPAD.fx / mmx_camera.fxh):
+Deferred::get_normals(uv) reads a real per-pixel view-space normal that
+Launchpad reconstructs from depth (via Camera::uv_to_proj), refines with
+a best-fit/weighted cross-product scheme, bilaterally smooths, and
+optionally perturbs from local texture/albedo contrast when the user
+sets Launchpad's own "Normal Map Mode" to Textured. No extra work is
+needed here to get the smoothed/textured version - Deferred::get_normals
+always returns whatever Launchpad's own settings currently produce.
+
+Camera::uv_to_proj builds position.y straight from uv.y with no separate
+camera-rotation matrix applied, and it comes out NEGATIVE at the top of
+the screen and POSITIVE at the bottom - i.e. this is a Y-DOWN view space,
+so "faces upward" corresponds to normal.y < 0, not > 0. The hemisphere
+blend below accounts for that. The Z sign is not relied on directly -
+rim uses abs(normal.z), which is orientation-agnostic either way.
+
+The "Flip Sky/Ground Axis" toggle is kept as a manual override for the
+one thing this can't see: camera roll. Launchpad's view space still
+assumes an unrolled camera, so on games/scenes with heavy banked camera
+roll the up/down split can drift - flip (or eventually blend by an
+actual roll angle, if you ever expose one) to correct for that case.
 */
 
 // XORB_CAPTURE_SIZE must be a compile-time constant (not a uniform)
@@ -223,10 +239,11 @@ float depth =
     Depth::get_linear_depth(uv);
 
 
-// 1.0 = fully sky-facing, 0.0 = fully ground-facing, per the assumed
-// normal convention noted at the top of this file.
+// Launchpad's reconstructed view space is Y-down (see header comment),
+// so "faces upward" is normal.y < 0 - flip the sign here, not the bias.
+// 1.0 = fully sky-facing, 0.0 = fully ground-facing.
 float skyFactor =
-    saturate(normal.y * 0.5 + 0.5);
+    saturate(-normal.y * 0.5 + 0.5);
 
 
 float3 skyColor =
