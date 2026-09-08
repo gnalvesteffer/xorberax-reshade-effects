@@ -9,6 +9,13 @@ Infers a crude "hemisphere" environmental light from the frame itself:
 - Blends between the two per-pixel using the surface normal's vertical
   component, giving a cheap hemisphere fill light for scenes that only
   ship a single directional sun color with no sky/ambient term.
+- Within each band, the lookup position varies with the normal's up/down
+  tilt (zenith-ish vs horizon-ish, and mirrored for ground/nadir) and
+  with the pixel's own screen column, so sky/ground color variation
+  (e.g. brighter near the sun, a darker cloud bank on one side) comes
+  through instead of a single flat averaged blob. "Sky/Ground Detail"
+  controls how much of that spatial variation survives the mip blur -
+  turned all the way up it collapses back to one flat average.
 - Adds a rim light in the same inferred color, driven by how edge-on the
   surface normal is to the camera.
 
@@ -123,6 +130,14 @@ ui_label = "Rim Falloff";
 ui_tooltip = "Higher narrows the rim to more edge-on surfaces";
 ui_min = 0.1;
 ui_max = 16.0;
+
+> = 3.0;
+
+uniform float UI_CAPTURE_DETAIL_MIP <
+ui_label = "Sky/Ground Detail";
+ui_tooltip = "Mip level read from the sky/ground capture. Low = more real\nspatial variation (can get noisy on a small capture). High = one\nflat averaged color, same as before this slider existed.";
+ui_min = 0.0;
+ui_max = XORB_CAPTURE_FINAL_MIP;
 
 > = 3.0;
 
@@ -262,16 +277,37 @@ float skyFactor =
     saturate(-normal.y * 0.5 + 0.5);
 
 
+// How strongly this normal points up/down, independent of the sky/ground
+// blend weight above - used to pick WHERE within the captured band to
+// sample, so a steep upward tilt reads nearer the zenith end of the sky
+// capture and a shallow one reads nearer the horizon end (mirrored for
+// ground/nadir), instead of every surface reading one flat average.
+float upAmount =
+    saturate(-normal.y);
+
+float downAmount =
+    saturate(normal.y);
+
+// U reuses this pixel's own screen column as a cheap proxy for "what's
+// the sky/ground doing over this part of the view" - not a real azimuth
+// lookup, but enough to catch e.g. sun-side vs shadow-side sky variation
+// without reprojecting a direction back into the capture's screen space.
+float2 skyLookupUV =
+    float2(uv.x, 1.0 - upAmount);
+
+float2 groundLookupUV =
+    float2(uv.x, downAmount);
+
 float3 skyColor =
     tex2Dlod(
         XorbSkyCapture,
-        float4(0.5, 0.5, 0, XORB_CAPTURE_FINAL_MIP)
+        float4(skyLookupUV, 0, UI_CAPTURE_DETAIL_MIP)
     ).rgb;
 
 float3 groundColor =
     tex2Dlod(
         XorbGroundCapture,
-        float4(0.5, 0.5, 0, XORB_CAPTURE_FINAL_MIP)
+        float4(groundLookupUV, 0, UI_CAPTURE_DETAIL_MIP)
     ).rgb;
 
 
