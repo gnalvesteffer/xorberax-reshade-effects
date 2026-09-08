@@ -84,7 +84,7 @@ ui_tooltip = "Overall multiplier for the inferred hemisphere fill light";
 ui_min = 0.0;
 ui_max = 3.0;
 
-> = 0.35;
+> = 0.01;
 
 uniform float UI_SKY_BRIGHTNESS_RESPONSE <
 ui_label = "Sky Brightness Response";
@@ -92,7 +92,7 @@ ui_tooltip = "How strongly the captured sky/ground brightness scales the\nfill a
 ui_min = 0.0;
 ui_max = 8.0;
 
-> = 3.0;
+> = 2.0;
 
 uniform float UI_SHADOW_BIAS <
 ui_label = "Shadow Bias";
@@ -131,7 +131,7 @@ ui_tooltip = "Higher narrows the rim to more edge-on surfaces";
 ui_min = 0.1;
 ui_max = 16.0;
 
-> = 3.0;
+> = 5.0;
 
 uniform float UI_RIM_DETAIL_BLEND <
 ui_label = "Rim Detail Blend";
@@ -139,7 +139,31 @@ ui_tooltip = "How much rim lighting follows high-frequency normal detail (0 = ig
 ui_min = 0.0;
 ui_max = 1.0;
 
+> = 0.5;
+
+uniform float UI_RIM_INWARD_STRENGTH <
+ui_label = "Rim Inward Strength";
+ui_tooltip = "How much rim light spreads inward on object surfaces near edges";
+ui_min = 0.0;
+ui_max = 3.0;
+
 > = 1.0;
+
+uniform float UI_RIM_INWARD_POWER <
+ui_label = "Rim Inward Power";
+ui_tooltip = "Exponent controlling falloff of inward spread (higher keeps it tighter to edges)";
+ui_min = 0.1;
+ui_max = 4.0;
+
+> = 1.0;
+
+uniform float UI_RIM_INWARD_MAX <
+ui_label = "Rim Inward Max";
+ui_tooltip = "Maximum multiplier applied by inward spread (1.0 = no additional rim)";
+ui_min = 1.0;
+ui_max = 4.0;
+
+> = 2.0;
 
 uniform float UI_RIM_DEPTH_EDGE_THRESHOLD <
 ui_label = "Rim Depth Edge Threshold";
@@ -155,7 +179,7 @@ ui_tooltip = "Softness around the depth-edge threshold for smoother rim falloff"
 ui_min = 0.0;
 ui_max = 0.02;
 
-> = 0.001;
+> = 0.300;
 
 uniform float UI_RIM_DEPTH_SCALE <
 ui_label = "Rim Depth Scale";
@@ -172,6 +196,14 @@ ui_min = 0.5;
 ui_max = 8.0;
 
 > = 2.0;
+
+uniform float UI_RIM_DEPTH_BLUR_SCALE <
+ui_label = "Rim Depth Blur Scale";
+ui_tooltip = "How aggressively the edge mask spreads across pixels of similar depth (higher = more inward spread)";
+ui_min = 0.0;
+ui_max = 200.0;
+
+> = 100.0;
 
 uniform int UI_RIM_EDGE_SAMPLES <
 ui_label = "Rim Edge Samples";
@@ -194,7 +226,7 @@ ui_tooltip = "Mip level read from the sky/ground capture. Low = more real\nspati
 ui_min = 0.0;
 ui_max = XORB_CAPTURE_FINAL_MIP;
 
-> = 3.0;
+> = 10.0;
 
 uniform float UI_SKY_DEPTH_CUTOFF <
 ui_label = "Sky Depth Cutoff";
@@ -229,7 +261,7 @@ ui_tooltip = "0 = flatten normals, 1 = neutral, >1 = amplify small normal variat
 ui_min = 0.0;
 ui_max = 3.0;
 
-> = 1.0;
+> = 0.300;
 
 texture DepthInputTex : DEPTH;
 sampler DepthInput { Texture = DepthInputTex; };
@@ -544,6 +576,8 @@ float normalFreq = length(ddxN) + length(ddyN);
 // Scale normalFreq by the user detail control so its influence respects UI_NORMAL_DETAIL.
 float detailMask = saturate(normalFreq * 20.0 * max(UI_NORMAL_DETAIL, 0.001));
 rimAmount *= lerp(1.0, detailMask, saturate(UI_RIM_DETAIL_BLEND));
+// Preserve base rim amount so we can apply inward spreading separately.
+float rimAmountBase = rimAmount;
 
 // Depth-edge mask: sample neighboring linear depth values and average
 // their absolute differences to create a softer, spreadable edge mask.
@@ -578,7 +612,51 @@ float edgeMask = smoothstep(edgeLow, edgeHigh, depthGrad);
 float spreadSoft = saturate((UI_RIM_EDGE_SPREAD - 1.0) / 7.0);
 edgeMask = pow(edgeMask, lerp(1.0, 0.7, spreadSoft));
 
-rimAmount *= edgeMask;
+// Neighbor-based inward softening: sample surrounding depths and
+// compute how many neighbors look like silhouette relative to this
+// pixel. This spreads edge energy inward across same-depth pixels.
+int samples2 = clamp(UI_RIM_EDGE_SAMPLES, 1, 16);
+float sumW = 0.0;
+float sumM = 0.0;
+float maxStepLen = max(length(uvStep), 1e-6);
+for (int i = 0; i < samples2; ++i)
+{
+    float fi = (float)i;
+    float ang = 6.28318530718 * (fi / (float)samples2);
+    float2 off = float2(cos(ang), sin(ang)) * uvStep;
+    float nd = Depth::get_linear_depth(uv + off);
+    // Use an exponential depth similarity so the UI_RIM_DEPTH_BLUR_SCALE
+    // directly controls how tolerant we are to depth differences. Larger
+    // UI_RIM_DEPTH_BLUR_SCALE -> more tolerant -> more inward spread.
+    float depthBlurInv = 1.0 / max(UI_RIM_DEPTH_BLUR_SCALE, 1e-6);
+    float depthDiff = abs(nd - depth);
+    float depthSimExp = exp(-depthDiff * depthBlurInv);
+    float r = length(off) / maxStepLen;
+    float gw = exp(-r * r * 2.0);
+    sumM += depthSimExp * gw;
+    sumW += gw;
+}
+float neighborAvg = sumM / max(sumW, 1e-6);
+// Combine center edge and neighbor similarity into a blurred mask. The
+// `blurStrength` controls how much of this blurred result replaces the
+// original edgeMask (0 = no blur, 1 = full blur).
+float blurStrength = saturate(UI_RIM_DEPTH_BLUR_SCALE / 100.0);
+float blurredMask = (edgeMask + neighborAvg) * 0.5;
+edgeMask = lerp(edgeMask, blurredMask, blurStrength);
+
+// Inward boost: increase rim on same-depth interior pixels near edges.
+// The inward contribution is computed from a base rim scale (not the
+// detail-masked rimAmountBase) so inward blurring remains visible even
+// when the normal-detail masking reduced rimAmountBase. It still uses
+// rimFactor to bias toward rim-facing surfaces.
+float inwardBoost = saturate(pow(neighborAvg, max(0.0001, UI_RIM_INWARD_POWER)) * UI_RIM_INWARD_STRENGTH);
+inwardBoost = min(inwardBoost, max(0.0, UI_RIM_INWARD_MAX - 1.0));
+float baseRimScale = UI_RIM_STRENGTH * skyBrightnessScalar * skyboxFade;
+float inwardContribution = baseRimScale * rimFactor * inwardBoost * neighborAvg;
+// Combine masked base rim (respecting normal-detail masking) with
+// the inward contribution, both modulated by edgeMask to keep the
+// energy focused near silhouettes and similar-depth interiors.
+rimAmount = (rimAmountBase * edgeMask) + (inwardContribution * edgeMask);
 
 
 float3 baseWithFill = centerColor + ambientTint * fillAmount;
