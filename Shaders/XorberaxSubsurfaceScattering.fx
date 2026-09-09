@@ -21,7 +21,7 @@ uniform float fStrength <
     ui_min = 0.0;
     ui_max = 2.0;
     ui_step = 0.01;
-> = 0.75;
+> = 0.10;
 
 uniform float fRadius <
     ui_label = "Radius";
@@ -30,7 +30,7 @@ uniform float fRadius <
     ui_min = 0.5;
     ui_max = 10.0;
     ui_step = 0.05;
-> = 2.5;
+> = 1.08;
 
 uniform float fFalloff <
     ui_label = "Falloff";
@@ -39,7 +39,7 @@ uniform float fFalloff <
     ui_min = 0.5;
     ui_max = 12.0;
     ui_step = 0.05;
-> = 3.0;
+> = 1.92;
 
 uniform float fScatterColorBleed <
     ui_label = "Color Bleed";
@@ -48,7 +48,7 @@ uniform float fScatterColorBleed <
     ui_min = 0.0;
     ui_max = 1.5;
     ui_step = 0.01;
-> = 0.45;
+> = 0.62;
 
 uniform float fHighlightProtect <
     ui_label = "Highlight Protect";
@@ -57,7 +57,7 @@ uniform float fHighlightProtect <
     ui_min = 0.0;
     ui_max = 1.0;
     ui_step = 0.01;
-> = 0.45;
+> = 0.23;
 
 uniform float fEdgeThreshold <
     ui_label = "Depth Edge Threshold";
@@ -66,7 +66,7 @@ uniform float fEdgeThreshold <
     ui_min = 0.0001;
     ui_max = 0.05;
     ui_step = 0.0005;
-> = 0.008;
+> = 0.0087;
 
 uniform float fMixBias <
     ui_label = "Mix Bias";
@@ -75,7 +75,25 @@ uniform float fMixBias <
     ui_min = 0.0;
     ui_max = 1.0;
     ui_step = 0.01;
-> = 0.25;
+> = 0.41;
+
+uniform float fShadowTransmission <
+    ui_label = "Shadow Transmission";
+    ui_tooltip = "Extra light transmission in shadowed skin and cloth, helping the subsurface layer read through darker areas.";
+    ui_type = "slider";
+    ui_min = 0.0;
+    ui_max = 2.0;
+    ui_step = 0.01;
+> = 1.61;
+
+uniform float fClothScatterBoost <
+    ui_label = "Cloth Scatter Boost";
+    ui_tooltip = "Boosts the scatter response for darker, cloth-like materials so garments read as more translucent.";
+    ui_type = "slider";
+    ui_min = 0.0;
+    ui_max = 2.0;
+    ui_step = 0.01;
+> = 0.84;
 
 uniform bool bUseSkinTint <
     ui_label = "Warm Skin Tint";
@@ -133,17 +151,30 @@ float4 PS_Subsurface(float4 position : SV_Position, float2 texcoord : TEXCOORD) 
     float3 blurredColor = blurred / max(totalWeight, 1e-5);
 
     float highlightMask = 1.0 - smoothstep(fHighlightProtect, fHighlightProtect + 0.4, baseLum);
-    float darkBoost = 1.0 + fMixBias * (1.0 - saturate(baseLum * 1.2));
+    float darkMask = saturate(1.0 - baseLum * 1.35);
+    float shadowTransmission = saturate((0.85 - baseLum) / 0.85);
+    float clothMask = saturate((1.0 - baseLum) / 1.0);
+
+    float avgLum = dot(blurredColor, float3(0.2126, 0.7152, 0.0722));
+    float lightFromNeighbors = saturate((avgLum - baseLum) * 1.8 + shadowTransmission * 0.8);
+
+    float darkBoost = 1.0 + fMixBias * darkMask;
+    float transmissionBoost = 1.0 + fShadowTransmission * shadowTransmission;
+    float clothScatterBoost = 1.0 + fClothScatterBoost * clothMask;
 
     float3 scatterTint = bUseSkinTint ? cTint : float3(1.0, 1.0, 1.0);
-    float3 subsurfaceColor = blurredColor * (1.0 + fScatterColorBleed) * scatterTint;
+    float3 transmittedColor = blurredColor * (0.5 + 1.2 * shadowTransmission + 0.8 * lightFromNeighbors);
+    transmittedColor = lerp(transmittedColor, transmittedColor * scatterTint, saturate(fScatterColorBleed + shadowTransmission * 0.5));
+    transmittedColor = lerp(baseColor, transmittedColor, saturate((1.0 - baseLum) * 0.9 + lightFromNeighbors));
 
-    float scatterWeight = saturate(fStrength * highlightMask * darkBoost);
-    float3 finalColor = ApplySubsurface(baseColor, subsurfaceColor, scatterWeight);
+    float softMask = saturate(fStrength * highlightMask * darkBoost * transmissionBoost * clothScatterBoost);
+    float transmissionWeight = softMask * (0.35 + 1.0 * shadowTransmission + 0.8 * lightFromNeighbors + 0.5 * clothMask);
+    float3 finalColor = lerp(baseColor, transmittedColor, saturate(transmissionWeight));
 
-    // Keep overly bright pixels from losing detail to the blur.
-    float brightProtectMask = 1.0 - smoothstep(0.7, 1.0, baseLum);
-    finalColor = lerp(finalColor, baseColor, 1.0 - brightProtectMask);
+    // Keep bright highlights and clean silhouettes from being flattened by the scatter.
+    float brightProtectMask = 1.0 - smoothstep(0.68, 1.0, baseLum);
+    float silhouetteProtect = 1.0 - saturate(abs(baseDepth - 1.0) * 8.0);
+    finalColor = lerp(finalColor, baseColor, 1.0 - brightProtectMask * (0.6 + 0.4 * silhouetteProtect));
 
     return float4(finalColor, original.a);
 }
