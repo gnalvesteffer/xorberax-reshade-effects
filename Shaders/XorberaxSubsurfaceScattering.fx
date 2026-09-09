@@ -163,8 +163,20 @@ float4 PS_Subsurface(float4 position : SV_Position, float2 texcoord : TEXCOORD) 
     float clothScatterBoost = 1.0 + fClothScatterBoost * clothMask;
 
     float3 scatterTint = bUseSkinTint ? cTint : float3(1.0, 1.0, 1.0);
+    float r = baseColor.r;
+    float g = baseColor.g;
+    float b = baseColor.b;
+    float brightness = max(r, max(g, b));
+    float warmRed = saturate((r - g * 0.65) * 1.7 + (r - b * 0.65) * 1.4);
+    float skinHueGate = saturate((r > g * 0.82 && r > b * 0.80) ? 1.0 : 0.0);
+    float chromaGate = saturate((brightness - min(r, min(g, b))) * 2.5);
+    float skinMask = warmRed * skinHueGate * chromaGate;
+    skinMask *= smoothstep(0.05, 1.0, brightness);
+    skinMask = saturate(skinMask * 1.8);
+
     float3 transmittedColor = blurredColor * (0.5 + 1.2 * shadowTransmission + 0.8 * lightFromNeighbors);
-    transmittedColor = lerp(transmittedColor, transmittedColor * scatterTint, saturate(fScatterColorBleed + shadowTransmission * 0.5));
+    float3 warmTintedColor = transmittedColor * lerp(float3(1.0, 1.0, 1.0), scatterTint, saturate(0.8 + fScatterColorBleed * 0.9 + shadowTransmission * 0.7));
+    transmittedColor = lerp(transmittedColor, warmTintedColor, skinMask);
     transmittedColor = lerp(baseColor, transmittedColor, saturate((1.0 - baseLum) * 0.9 + lightFromNeighbors));
 
     float softMask = saturate(fStrength * highlightMask * darkBoost * transmissionBoost * clothScatterBoost);
